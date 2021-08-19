@@ -10,13 +10,14 @@ import Debug.Trace ( trace )
 
 -- ghc
 import qualified Outputable as PP
-import qualified Convert as GHC
+import qualified GHC.ThToHs as GHC
+import qualified BasicTypes as GHC
 import qualified CoreUtils
 import qualified Desugar as GHC
 import qualified Finder as GHC
 import qualified GHC
 import qualified GhcPlugins as GHC
-import qualified HsExpr as Expr
+import qualified GHC.Hs.Expr as Expr
 import qualified IfaceEnv as GHC
 import qualified PrelNames as GHC
 import qualified RnExpr as GHC
@@ -28,6 +29,7 @@ import qualified TcRnMonad as GHC
 import qualified TcSMonad as GHC ( runTcS )
 import qualified TcSimplify as GHC
 import qualified TcType as GHC
+import qualified TyCoRep as GHC
 
 -- syb
 import Data.Generics ( everywhereM, mkM )
@@ -36,7 +38,7 @@ import Data.Generics ( everywhereM, mkM )
 import Language.Haskell.TH as TH
 
 -- what-it-do
-import qualified Constraint
+import qualified OurConstraint
 
 
 
@@ -146,7 +148,8 @@ traceBind loc t pat expr e1 e2 = do
             ( GHC.defaultUserStyle GHC.unsafeGlobalDynFlags )
 
       Right traceExprPs <-
-        fmap ( GHC.convertToHsExpr GHC.noSrcSpan )
+          -- TODO is GHC.Generated right here? or FromSource?
+        fmap ( GHC.convertToHsExpr GHC.Generated GHC.noSrcSpan )
           $ liftIO
           $ TH.runQ
           $ [| ( >>= \x ->
@@ -169,7 +172,7 @@ traceBind loc t pat expr e1 e2 = do
         GHC.captureConstraints
           ( GHC.tcMonoExpr
               traceExprRn
-              ( GHC.Check ( GHC.mkFunTy exprT exprT ) )
+              ( GHC.Check ( GHC.mkFunTy GHC.VisArg exprT exprT ) )
           )
 
       -- Solve wanted constraints and build a wrapper.
@@ -177,8 +180,9 @@ traceBind loc t pat expr e1 e2 = do
         GHC.EvBinds . GHC.evBindMapBinds . snd
           <$> GHC.runTcS ( GHC.solveWanteds wanteds )
 
+      emptyZonkEnv <- GHC.emptyZonkEnv
       ( _, zonkedEvBinds ) <-
-        GHC.zonkTcEvBinds GHC.emptyZonkEnv evBinds
+        GHC.zonkTcEvBinds emptyZonkEnv evBinds
 
       let
         wrapper =
@@ -227,6 +231,6 @@ hasShow t = do
       GHC.mkVanillaGlobal dictName dict_ty
 
   GHC.EvBinds evBinds <-
-    Constraint.getDictionaryBindings dict_var dict_ty
+    OurConstraint.getDictionaryBindings dict_var
 
   return ( not ( null ( toList evBinds ) ) )

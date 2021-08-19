@@ -13,5 +13,5 @@ library
                , template-haskell
                , prettyprinter
   exposed-modules: WhatItDo
-  other-modules: Constraint
+  other-modules: OurConstraint
   ghc-options: -Wall
