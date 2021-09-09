@@ -46,7 +46,7 @@ plugin =
   GHC.defaultPlugin
     { GHC.typeCheckResultAction = \_cliOptions -> pluginImpl
     , GHC.pluginRecompile = GHC.purePlugin
-    -- ^ TODO okay?
+    -- TODO above okay?
     }
 
 
