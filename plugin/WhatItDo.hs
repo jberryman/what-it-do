@@ -1,4 +1,5 @@
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE LambdaCase, BangPatterns #-}
 
 module WhatItDo ( plugin, traceDo ) where
 
@@ -6,7 +7,7 @@ module WhatItDo ( plugin, traceDo ) where
 import Data.Traversable ( for )
 import Control.Monad.IO.Class ( liftIO )
 import Data.Foldable ( toList )
-import Debug.Trace ( trace )
+import Debug.Trace ( traceM )
 
 -- ghc
 import qualified Outputable as PP
@@ -40,12 +41,12 @@ import Language.Haskell.TH as TH
 -- what-it-do
 import qualified OurConstraint
 
-
-
 plugin :: GHC.Plugin
 plugin =
   GHC.defaultPlugin
     { GHC.typeCheckResultAction = \_cliOptions -> pluginImpl
+    , GHC.pluginRecompile = GHC.purePlugin
+    -- ^ TODO okay?
     }
 
 
@@ -62,21 +63,25 @@ pluginImpl _modSummary tcGblEnv = do
           Nothing
       )
 
+    -- TODO noTrace for disabling
   traceDoName <-
     GHC.lookupId
       =<< GHC.lookupOrig assertExplainerModule ( GHC.mkVarOcc "traceDo" )
 
   tcg_binds <-
-    mkM ( whatItDo traceDoName ) `everywhereM` GHC.tcg_binds tcGblEnv
+      -- TODO everywhereButM where traceDont
+    mkM ( ourTraceDo ) `everywhereM` GHC.tcg_binds tcGblEnv
+    -- mkM ( whatItDo traceDoName ) `everywhereM` GHC.tcg_binds tcGblEnv
 
   return tcGblEnv { GHC.tcg_binds = tcg_binds }
 
 
+-- TODO: we might want a noTrace function...
 traceDo :: m a -> m a
 traceDo =
   id
 
-
+    {-
 whatItDo
   :: GHC.Id -> Expr.LHsExpr GHC.GhcTc -> GHC.TcM ( Expr.LHsExpr GHC.GhcTc )
 whatItDo traceDoName ( GHC.L _ ( Expr.HsApp _ ( GHC.L _ ( Expr.HsWrap _ _ ( Expr.HsVar _ ( GHC.L _ v ) ) ) ) ( GHC.L _ body ) ) ) | v == traceDoName = do
@@ -84,6 +89,7 @@ whatItDo traceDoName ( GHC.L _ ( Expr.HsApp _ ( GHC.L _ ( Expr.HsWrap _ _ ( Expr
 
   where
 
+    go :: Expr.HsExpr GHC.GhcTc -> GHC.TcM (Expr.HsExpr GHC.GhcTc)
     go ( Expr.HsDo t Expr.DoExpr ( GHC.L _ stmts ) ) = do
       stmts' <-
         for
@@ -111,8 +117,120 @@ whatItDo traceDoName ( GHC.L _ ( Expr.HsApp _ ( GHC.L _ ( Expr.HsWrap _ _ ( Expr
 
 whatItDo _ other =
   return other
+-}
+
+-- TODO OUR WIP
+-- GHC.L (SrcSpan)
+ourTraceDo
+  :: Expr.LHsExpr GHC.GhcTc -> GHC.TcM ( Expr.LHsExpr GHC.GhcTc )
+ourTraceDo =
+  -- fmap GHC.noLoc . \case
+  \case
+    -- TODO sweet HsDo is HsExpr, so we can treat this like 'expr' in traceBind
+    -- x@(GHC.L loc ( Expr.HsDo t Expr.DoExpr ( GHC.L _ stmts ) )) ->
+    --   x <$ GHC.addWarnAt
+    --          GHC.NoReason
+    --          loc
+    --          ( PP.text "DOOOOOOOOOOO" )
+    doExpr@(GHC.L loc ( Expr.HsDo _ Expr.DoExpr _ )) ->
+      ourRewriteDoExpr loc doExpr
+
+    x -> return x
+  -- where
+
+  --   go :: Expr.HsExpr GHC.GhcTc -> GHC.TcM (Expr.HsExpr GHC.GhcTc)
+  --   go ( Expr.HsDo t Expr.DoExpr ( GHC.L _ stmts ) ) = do
+  --     stmts' <-
+  --       for
+  --         stmts
+  --         ( \orig@( GHC.L loc stmt ) ->
+  --             case stmt of
+  --               Expr.BindStmt bt pat expr e1 e2 -> do
+  --                 traceBind loc bt pat expr e1 e2
+
+  --               _ ->
+  --                 return orig
+  --         )
+
+  --     return ( Expr.HsDo t Expr.DoExpr ( GHC.noLoc stmts' ) )
+
+  --   go ( Expr.HsPar a ( GHC.L b c ) ) =
+  --     Expr.HsPar a <$> ( GHC.L b <$> go c )
+
+  --   go o@( Expr.HsVar _ ( GHC.L loc _ ) ) =
+  --     o
+  --       <$ GHC.addWarnAt
+  --            GHC.NoReason
+  --            loc
+  --            ( PP.text "debugDo cannot be used on variables" )
 
 
+-- TODO we also want to get our threadId and include that here
+-- TODO also make this a bracket pattern if IO-ish? Maybe only inject when MonadBaseControl IO m ?
+ourTraceSpan :: (Monad m)=> String -> m a -> m a
+ourTraceSpan locString = \m -> do
+    traceM $ "XXXXX START " ++ locString
+    !a <- m -- TODO we might not wish to evaluate to WHNF here, or provide options
+    traceM $ "XXXXX END   " ++ locString
+    return a
+{-# INLINE ourTraceSpan #-}
+
+ourRewriteDoExpr
+  :: GHC.SrcSpan
+  -> Expr.LHsExpr GHC.GhcTc
+  -> GHC.TcM (Expr.LHsExpr GHC.GhcTc)
+ourRewriteDoExpr loc doExpr = do
+  Just doExprT <- typeOfExpr doExpr
+  let
+    ppWhere =
+      GHC.renderWithStyle
+        GHC.unsafeGlobalDynFlags
+        ( GHC.ppr loc )
+        ( GHC.defaultUserStyle GHC.unsafeGlobalDynFlags )
+
+  Right traceExprPs <-
+      -- TODO is GHC.Generated right here? or FromSource?
+    fmap ( GHC.convertToHsExpr GHC.Generated GHC.noSrcSpan )
+      $ liftIO
+      $ TH.runQ
+      $ [| (ourTraceSpan ppWhere) |]
+
+  ( traceExprRn, _ ) <-
+    GHC.rnLExpr traceExprPs
+
+  ( traceExprTc, wanteds ) <-
+    GHC.captureConstraints
+      ( GHC.tcMonoExpr
+          traceExprRn
+          ( GHC.Check ( GHC.mkFunTy GHC.VisArg doExprT doExprT ) )
+      )
+
+  -- Solve wanted constraints and build a wrapper.
+  evBinds <-
+    GHC.EvBinds . GHC.evBindMapBinds . snd
+      <$> GHC.runTcS ( GHC.solveWanteds wanteds )
+
+  emptyZonkEnv <- GHC.emptyZonkEnv
+  ( _, zonkedEvBinds ) <-
+    GHC.zonkTcEvBinds emptyZonkEnv evBinds
+
+  let
+    wrapper =
+      GHC.mkWpLet zonkedEvBinds
+  --------------- TODO can this chunk of work above be done just once higher up?
+
+  -- Apply the wrapper to our type checked syntax and fully saturate the
+  -- diagnostic function with the necessary arguments.
+  newBody <-
+    GHC.zonkTopLExpr
+      ( GHC.mkHsApp
+          ( GHC.mkLHsWrap wrapper traceExprTc )
+          doExpr
+      )
+
+  return newBody
+
+    {-
 traceBind
   :: GHC.SrcSpan
   -> GHC.Type
@@ -192,6 +310,10 @@ traceBind loc t pat expr e1 e2 = do
       -- diagnostic function with the necessary arguments.
       newBody <-
         GHC.zonkTopLExpr
+            -- TODO
+            -- GHC.mkHsApp
+            --   :: Expr.LHsExpr (GHC.GhcPass id)
+            --      -> Expr.LHsExpr (GHC.GhcPass id) -> Expr.LHsExpr (GHC.GhcPass id)
           ( GHC.mkHsApp
               ( GHC.mkLHsWrap wrapper traceExprTc )
               expr
@@ -200,7 +322,7 @@ traceBind loc t pat expr e1 e2 = do
       return ( GHC.L loc ( Expr.BindStmt t pat newBody e1 e2 ) )
   else
     return ( GHC.L loc ( Expr.BindStmt t pat expr e1 e2 ) )
-
+-}
 
 typeOfExpr :: Expr.LHsExpr GHC.GhcTc -> GHC.TcM ( Maybe GHC.Type )
 typeOfExpr e = do
@@ -234,3 +356,24 @@ hasShow t = do
     OurConstraint.getDictionaryBindings dict_var
 
   return ( not ( null ( toList evBinds ) ) )
+
+    {-
+showClassName :: Name
+showClassName   = clsQual gHC_SHOW (fsLit "Show")      showClassKey
+clsQual  = mk_known_key_name clsName 
+clsName   = TcClsName  
+gHC_SHOW        = mkBaseModule (fsLit "GHC.Show")
+
+showClassKey            = mkPreludeClassUnique 17
+mkPreludeClassUnique i = mkUnique '2' i
+
+-- (from module Name)
+-- | A unique, unambiguous name for something, containing information about where
+-- that thing originated.
+data Name = Name {
+                n_sort :: NameSort,     -- What sort of name it is
+                n_occ  :: !OccName,     -- Its occurrence name
+                n_uniq :: {-# UNPACK #-} !Unique,
+                n_loc  :: !SrcSpan      -- Definition site
+            }
+-}
