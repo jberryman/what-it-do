@@ -12,6 +12,10 @@ library
                , containers
                , template-haskell
                , prettyprinter
+               , ghc-paths
+               -- For the instrumentation payload, for now:
+               , mtl
+               , text
   exposed-modules: WhatItDo
   other-modules: OurConstraint
   ghc-options: -Wall

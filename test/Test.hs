@@ -1,4 +1,5 @@
 {-# OPTIONS -fplugin=WhatItDo #-}
+{-# LANGUAGE BangPatterns #-}
 import WhatItDo (traceDo)
 -- main =
 --   traceDo (do
@@ -9,6 +10,7 @@ import WhatItDo (traceDo)
 --     print c)
 
 import Control.Concurrent
+import Control.Monad.IO.Class
 
 announceSleep :: Int -> IO ()
 announceSleep n = putStrLn ("Sleeping for secs: "++show n) >> threadDelay (n*1000*1000)
@@ -20,6 +22,7 @@ main = do                 -- 17-25
        announceSleep 1
        do announceSleep 2 -- 21-21
     n <- return 2
+    -- doesThisBreak
     anotherDoFunc
     announceSleep n
     anotherTopLevelDoFunc
@@ -31,3 +34,7 @@ main = do                 -- 17-25
 anotherTopLevelDoFunc :: IO ()
 anotherTopLevelDoFunc = do     -- 32-33
     announceSleep 2
+
+-- FIXME:
+doesThisBreak :: MonadIO m => m ()
+doesThisBreak = do return ()
