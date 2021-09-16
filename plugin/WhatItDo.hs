@@ -30,6 +30,11 @@ import qualified TcSimplify as GHC
 import qualified TcType as GHC
 import qualified TyCoRep as GHC
 import qualified GHC.Paths
+import Finder as GHC
+import Outputable
+import TcInteract as GHC
+import Constraint as GHC
+import TcOrigin
 
 -- syb
 import Data.Generics ( everywhereM, mkM )
@@ -42,7 +47,7 @@ import qualified OurConstraint
 
 -- For the instrumentation payload, for now:
 import qualified Data.Text as T
-import Control.Monad.Reader 
+import Control.Monad.Reader
 
 import Debug.Trace
 
@@ -74,22 +79,33 @@ pluginImpl _modSummary tcGblEnv = do
       =<< GHC.lookupOrig assertExplainerModule ( GHC.mkVarOcc "traceDo" )
 
   -- Constructor 'MonadReader Text' Type:
-  monadReader <- getClassOrTypeName "Control.Monad.Reader" "MonadReader"
-  text <- getClassOrTypeName "Data.Text" "Text"
+  monadReader <- getClassOrTypeName "Control.Monad.Reader.Class" "MonadReader"
+  text <- getClassOrTypeName "Data.Text.Internal" "Text"
+
   let monadReaderText = (monadReader, [text]) :: OurConstraint
 
   -- The logic for rewriting expressions:
-  let instrumentDoBlock :: Expr.LHsExpr GHC.GhcTc -> GHC.TcM ( Expr.LHsExpr GHC.GhcTc )
+  let instrumentDoBlock :: Expr.LHsExpr GHC.GhcTc -> ReaderT [GHC.EvVar] GHC.TcM ( Expr.LHsExpr GHC.GhcTc )
       instrumentDoBlock =
         \case
-          doExpr@(GHC.L loc ( Expr.HsDo _ Expr.DoExpr _ )) ->
-            ourRewriteDoExpr monadReaderText loc doExpr
+          doExpr@(GHC.L loc ( Expr.HsDo _ Expr.DoExpr _ )) -> do
+            vars <- ask
+            lift $ ourRewriteDoExpr vars monadReaderText loc doExpr
 
           x -> return x
 
-  tcg_binds <-
+      -- Find each binding, then instrument each internal do_block based on
+      -- the local evidence introduced on that binding.
+      addLocalEvidence :: GHC.HsBindLR GHC.GhcTc GHC.GhcTc -> ReaderT [GHC.EvVar] GHC.TcM (GHC.HsBindLR GHC.GhcTc GHC.GhcTc)
+      addLocalEvidence =
+        \case
+          ab@GHC.AbsBinds {} -> local (++ (GHC.abs_ev_vars ab)) (
+                              mkM instrumentDoBlock `everywhereM` ab)
+          x -> return x
+
+  tcg_binds <- flip runReaderT [] $
       -- TODO everywhereButM where not noTrace ?
-    mkM instrumentDoBlock `everywhereM` GHC.tcg_binds tcGblEnv
+    mkM addLocalEvidence `everywhereM` GHC.tcg_binds tcGblEnv
 
   return tcGblEnv { GHC.tcg_binds = tcg_binds }
 
@@ -98,7 +114,6 @@ pluginImpl _modSummary tcGblEnv = do
 traceDo :: m a -> m a
 traceDo =
   id
-
 
 
 -- TODO we also want to get our threadId and include that here
@@ -128,15 +143,22 @@ traceInstrumentationWithContext locString = \m -> do
 
 
 ourRewriteDoExpr
-  :: OurConstraint
+  :: [GHC.EvVar]
+  -> OurConstraint
   -- ^ @MonadReader Text@ for now.
   -> GHC.SrcSpan
   -> Expr.LHsExpr GHC.GhcTc
   -> GHC.TcM (Expr.LHsExpr GHC.GhcTc)
-ourRewriteDoExpr monadReaderText loc doExpr = do
+ourRewriteDoExpr local_ev_vars monadReaderText loc doExpr = do
   Just doExprT <- typeOfExpr doExpr
-  -- let ( _m, a ) = GHC.splitAppTy doExprT  -- NOTE, for if we want to inspect return type
-  canAsk <- hasInstance monadReaderText doExprT
+  let ( m, _a ) = GHC.splitAppTy doExprT  -- Split up the type do get the `m` part
+
+  -- Make the givens from the local environment.
+  lcl_env <- GHC.getLclEnv
+  let ct = CtLoc DefaultOrigin lcl_env Nothing initialSubGoalDepth
+      givens = mkGivens ct local_ev_vars
+
+  canAsk <- hasInstance givens monadReaderText m
   let
     ppWhere =
       GHC.renderWithStyle
@@ -166,7 +188,7 @@ ourRewriteDoExpr monadReaderText loc doExpr = do
   -- Solve wanted constraints and build a wrapper.
   evBinds <-
     GHC.EvBinds . GHC.evBindMapBinds . snd
-      <$> GHC.runTcS ( GHC.solveWanteds wanteds )
+      <$> GHC.runTcS (GHC.solveSimpleGivens givens >> GHC.solveWanteds wanteds )
 
   emptyZonkEnv <- GHC.emptyZonkEnv
   ( _, zonkedEvBinds ) <-
@@ -198,13 +220,13 @@ typeOfExpr e = do
 
 -- | (Type class name , Optional type arguments to type class), e.g.
 -- representing @MonadReader Text@
-type OurConstraint = (GHC.Name , [GHC.Name]) 
+type OurConstraint = (GHC.Name , [GHC.Name])
 
 -- TODO maybe this needs just a list of Names passed in
 -- | Given the 'GHC.Name' of a class C (see 'getClassName'), and a typed
 -- expression, ensure that it has an instance of C.
-hasInstance :: OurConstraint -> GHC.Type -> GHC.TcM Bool
-hasInstance (className,classArgs) t = do
+hasInstance :: [Ct] -> OurConstraint -> GHC.Type -> GHC.TcM Bool
+hasInstance givens (className,classArgs) t = do
   classTyCon  <-
     GHC.tcLookupTyCon className
   -- NOTE: internally tcMetaTy is just: tcLookupTyCon + mkTyConApp []
@@ -221,16 +243,18 @@ hasInstance (className,classArgs) t = do
       GHC.mkVanillaGlobal dictName dict_ty
 
   GHC.EvBinds evBinds <-
-    OurConstraint.getDictionaryBindings dict_var
+    OurConstraint.getDictionaryBindings givens dict_var
 
-  return ( not ( null ( toList evBinds ) ) )
+  pprTraceM "hasInstance" (GHC.ppr evBinds)
+
+  return ( not ( null (filter (not . GHC.eb_is_given) (toList evBinds ) ) ) )
 
 -- | Lookup a type class or type by module and name:
 getClassOrTypeName :: String -> String -> GHC.TcM GHC.Name
 getClassOrTypeName moduleString classString = do
-  -- TODO is runGhc expensive to do here?
-  -- TODO is our use of ghc-paths right here?
-  modul <- liftIO $ GHC.runGhc Nothing $   -- ERROR: Missing file: /home/me/.ghcup/ghc/8.10.2/lib/ghc-8.10.2/lib/settings
-  -- modul <- liftIO $ GHC.runGhc (Just GHC.Paths.libdir) $
-      GHC.lookupModule (GHC.mkModuleName moduleString) Nothing
-  GHC.lookupOrig modul (GHC.mkOccName GHC.tcClsName classString)
+  hsc_env <- GHC.getTopEnv
+  lookup_res <- liftIO $ findImportedModule hsc_env (GHC.mkModuleName moduleString) Nothing
+  case lookup_res of
+    Found _ modul -> GHC.lookupOrig modul (GHC.mkOccName GHC.tcClsName classString)
+    NoPackage uid -> GHC.pprPanic "np" (GHC.ppr uid)
+    NotFound a b c d e f -> GHC.pprPanic "np" (GHC.ppr a $$ GHC.ppr b $$ GHC.ppr c $$ GHC.ppr d $$ GHC.ppr e)
