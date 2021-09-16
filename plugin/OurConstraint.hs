@@ -19,6 +19,7 @@ import TcOrigin
 import TcSMonad
 import TcSimplify
 import Constraint
+import TcInteract
 
 -- import Generics.SYB hiding (empty)
 
@@ -33,8 +34,8 @@ import Constraint
 
 
 -- Pass in "Show ()" for example
-getDictionaryBindings :: Var -> TcM TcEvBinds
-getDictionaryBindings dict_var = do
+getDictionaryBindings :: [Ct] -> Var -> TcM TcEvBinds
+getDictionaryBindings givens dict_var = do
 
     loc <- getCtLocM (GivenOrigin UnkSkol) Nothing
     let nonC = mkNonCanonical CtWanted
@@ -44,7 +45,7 @@ getDictionaryBindings dict_var = do
             , ctev_loc = loc
             }
         wCs = mkSimpleWC [cc_ev nonC]
-    (_, evBinds) <- second evBindMapBinds <$> runTcS (solveWanteds wCs)
+    (_, evBinds) <- second evBindMapBinds <$> runTcS (solveSimpleGivens givens >> solveWanteds wCs)
     return (EvBinds evBinds)
 
 
