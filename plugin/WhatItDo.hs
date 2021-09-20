@@ -1,20 +1,16 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE LambdaCase, BangPatterns, FlexibleContexts #-}
+{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
 
 module WhatItDo ( plugin, traceDo ) where
 
 -- base
-import Data.Traversable ( for )
-import Control.Monad.IO.Class ( liftIO )
-import Data.Foldable ( toList )
-import Debug.Trace ( traceM )
-
 -- ghc
 import qualified GHC.ThToHs as GHC
 import qualified BasicTypes as GHC
-import qualified CoreUtils
-import qualified Desugar as GHC
-import qualified Finder as GHC
 import qualified GHC
 import qualified GhcPlugins as GHC
 import qualified GHC.Hs.Expr as Expr
@@ -29,15 +25,13 @@ import qualified TcSMonad as GHC ( runTcS )
 import qualified TcSimplify as GHC
 import qualified TcType as GHC
 import qualified TyCoRep as GHC
-import qualified GHC.Paths
 import Finder as GHC
-import Outputable
+import Outputable ( ($$) )
 import TcInteract as GHC
 import Constraint as GHC
 import TcOrigin
 
--- syb
-import Data.Generics ( everywhereM, mkM )
+import Data.Generics ( GenericM, Data, gmapM, ext0 )
 
 -- template-haskell
 import Language.Haskell.TH as TH
@@ -50,6 +44,19 @@ import qualified Data.Text as T
 import Control.Monad.Reader
 
 import Debug.Trace
+import GHC.Hs.Binds
+import Var (EvVar)
+import Data.Typeable
+import qualified TcErrors as GHC
+import Data.Maybe
+import TcMType (newFlexiTyVar, newWanted)
+import Type (liftedTypeKind)
+
+-- When true, report unsolvable constraint errors rather than just not instrumenting
+developing :: Bool
+developing = False
+
+data Env = Env { loc :: Maybe GHC.SrcSpan, evidence :: [EvVar]  }
 
 plugin :: GHC.Plugin
 plugin =
@@ -74,7 +81,7 @@ pluginImpl _modSummary tcGblEnv = do
       )
 
     -- TODO noTrace for disabling
-  traceDoName <-
+  _traceDoName <-
     GHC.lookupId
       =<< GHC.lookupOrig assertExplainerModule ( GHC.mkVarOcc "traceDo" )
 
@@ -85,29 +92,67 @@ pluginImpl _modSummary tcGblEnv = do
   let monadReaderText = (monadReader, [text]) :: OurConstraint
 
   -- The logic for rewriting expressions:
-  let instrumentDoBlock :: Expr.LHsExpr GHC.GhcTc -> ReaderT [GHC.EvVar] GHC.TcM ( Expr.LHsExpr GHC.GhcTc )
-      instrumentDoBlock =
-        \case
-          doExpr@(GHC.L loc ( Expr.HsDo _ Expr.DoExpr _ )) -> do
-            vars <- ask
-            lift $ ourRewriteDoExpr vars monadReaderText loc doExpr
+  let instrumentDoBlock :: ((Expr.HsExpr GHC.GhcTc) -> ReaderT Env GHC.TcM ( Expr.HsExpr GHC.GhcTc ))
+                        -> Expr.HsExpr GHC.GhcTc -> ReaderT Env GHC.TcM ( Expr.HsExpr GHC.GhcTc )
+      instrumentDoBlock k v = do
+        case v of
+          (Expr.HsDo ty Expr.DoExpr _ ) -> do
+            res <- k v
+            Env loc vars <- ask
+            lift $ ourRewriteDoExpr vars ty monadReaderText (fromMaybe GHC.noSrcSpan loc) res
+          -- Add evidence from local wrappers
+          (Expr.HsWrap _ wrap _) -> do
+            let ev_vars = gatherEvVars wrap []
+            local (\e -> e { evidence = evidence e ++ ev_vars}) (k v)
 
-          x -> return x
+          _x -> k v
 
       -- Find each binding, then instrument each internal do_block based on
       -- the local evidence introduced on that binding.
-      addLocalEvidence :: GHC.HsBindLR GHC.GhcTc GHC.GhcTc -> ReaderT [GHC.EvVar] GHC.TcM (GHC.HsBindLR GHC.GhcTc GHC.GhcTc)
-      addLocalEvidence =
-        \case
-          ab@GHC.AbsBinds {} -> local (++ (GHC.abs_ev_vars ab)) (
-                              mkM instrumentDoBlock `everywhereM` ab)
-          x -> return x
+      addLocalEvidence :: ((HsBindLR GHC.GhcTc GHC.GhcTc -> ReaderT Env GHC.TcM b)
+                  -> HsBindLR GHC.GhcTc GHC.GhcTc -> ReaderT Env GHC.TcM b)
+      addLocalEvidence k v =
+        case v of
+          ab@GHC.AbsBinds {} -> do
+              local (\e -> e { evidence = evidence e ++ (GHC.abs_ev_vars ab)}) (k v)
+          x -> k x
 
-  tcg_binds <- flip runReaderT [] $
+      locations ::  (Typeable e) => (GHC.GenLocated GHC.SrcSpan e
+                   -> ReaderT Env GHC.TcM (GHC.GenLocated GHC.SrcSpan e))
+                  -> GHC.GenLocated GHC.SrcSpan e -> ReaderT Env GHC.TcM (GHC.GenLocated GHC.SrcSpan e)
+      locations k l@(GHC.L cur_loc _) = local (\e -> e { loc = Just cur_loc}) (k l)
+
+      traversal :: Typeable a0 => ((a0 -> ReaderT Env GHC.TcM a0)
+                  -> a0 -> ReaderT Env GHC.TcM a0)
+      traversal = (mkM2 addLocalEvidence `extM2` instrumentDoBlock)
+                                         `extM2` (locations @(GHC.HsExpr GHC.GhcTc))
+
+  tcg_binds <- flip runReaderT (Env Nothing []) $
       -- TODO everywhereButM where not noTrace ?
-    mkM addLocalEvidence `everywhereM` GHC.tcg_binds tcGblEnv
+    everywhereM' (traversal) (GHC.tcg_binds tcGblEnv)
 
   return tcGblEnv { GHC.tcg_binds = tcg_binds }
+
+gatherEvVars :: GHC.HsWrapper -> [EvVar] -> [EvVar]
+gatherEvVars (GHC.WpEvLam ev) acc = GHC.pprTrace "tylam" (GHC.ppr (GHC.idType ev)) ev : acc
+gatherEvVars (GHC.WpCompose w1 w2) acc = gatherEvVars w1 (gatherEvVars w2 acc)
+gatherEvVars _ acc = acc
+
+newtype M2 m a = M2 { unM2 :: (a -> m a) -> a -> m a }
+
+extM2 :: (Typeable a, Typeable b) => ((a -> m a) -> a -> m a) -> ((b -> m b) -> b -> m b) -> (a -> m a) -> a -> m a
+extM2 def ext = unM2 ((M2 def) `ext0` (M2 ext))
+
+mkM2 :: (Typeable a, Typeable b, Functor f) => ((b -> f b) -> b -> f b) -> (a -> f a) -> a -> f a
+mkM2 ext = extM2 (\k a -> k a) ext
+
+everywhereM' :: forall m. Monad m => (forall a . Data a => (a -> m a) -> a -> m a) -> GenericM m
+everywhereM' f = go
+  where
+    go :: forall a . Data a => a -> m a
+    go x = do
+      res <- f (gmapM go) x
+      return res
 
 
 -- TODO: we might instead want a noTrace function to disable...
@@ -144,21 +189,18 @@ traceInstrumentationWithContext locString = \m -> do
 
 ourRewriteDoExpr
   :: [GHC.EvVar]
+  -> GHC.Type
   -> OurConstraint
   -- ^ @MonadReader Text@ for now.
   -> GHC.SrcSpan
-  -> Expr.LHsExpr GHC.GhcTc
-  -> GHC.TcM (Expr.LHsExpr GHC.GhcTc)
-ourRewriteDoExpr local_ev_vars monadReaderText loc doExpr = do
-  Just doExprT <- typeOfExpr doExpr
-  let ( m, _a ) = GHC.splitAppTy doExprT  -- Split up the type do get the `m` part
-
+  -> Expr.HsExpr GHC.GhcTc
+  -> GHC.TcM (Expr.HsExpr GHC.GhcTc)
+ourRewriteDoExpr local_ev_vars doExprT monadReaderText loc doExpr = GHC.setSrcSpan loc $ GHC.checkNoErrs $ do
   -- Make the givens from the local environment.
   lcl_env <- GHC.getLclEnv
   let ct = CtLoc DefaultOrigin lcl_env Nothing initialSubGoalDepth
       givens = mkGivens ct local_ev_vars
-
-  canAsk <- hasInstance givens monadReaderText m
+  canAsk <- hasInstance givens monadReaderText doExprT
   let
     ppWhere =
       GHC.renderWithStyle
@@ -168,7 +210,7 @@ ourRewriteDoExpr local_ev_vars monadReaderText loc doExpr = do
 
   Right traceExprPs <-
       -- TODO is GHC.Generated right here? or FromSource?
-    fmap ( GHC.convertToHsExpr GHC.Generated GHC.noSrcSpan )
+    fmap ( GHC.convertToHsExpr GHC.Generated loc )
       $ liftIO
       $ TH.runQ
       $ if canAsk
@@ -179,43 +221,45 @@ ourRewriteDoExpr local_ev_vars monadReaderText loc doExpr = do
     GHC.rnLExpr traceExprPs
 
   ( traceExprTc, wanteds ) <-
-    GHC.captureConstraints
+    GHC.captureTopConstraints
       ( GHC.tcMonoExpr
           traceExprRn
           ( GHC.Check ( GHC.mkFunTy GHC.VisArg doExprT doExprT ) )
       )
 
   -- Solve wanted constraints and build a wrapper.
-  evBinds <-
-    GHC.EvBinds . GHC.evBindMapBinds . snd
-      <$> GHC.runTcS (GHC.solveSimpleGivens givens >> GHC.solveWanteds wanteds )
+  (wc, ev_binds_map) <- GHC.runTcS (GHC.solveSimpleGivens givens >> GHC.solveWanteds wanteds )
 
-  emptyZonkEnv <- GHC.emptyZonkEnv
-  ( _, zonkedEvBinds ) <-
-    GHC.zonkTcEvBinds emptyZonkEnv evBinds
+  when developing $ GHC.reportAllUnsolved wc
 
-  let
-    wrapper =
-      GHC.mkWpLet zonkedEvBinds
-  --------------- TODO can some of this chunk of work above be done just once, in the caller?
-
-  -- Apply the wrapper to our type checked syntax and fully saturate the
-  -- diagnostic function with the necessary arguments.
-  newBody <-
-    GHC.zonkTopLExpr
-      ( GHC.mkHsApp
-          ( GHC.mkLHsWrap wrapper traceExprTc )
-          doExpr
-      )
-
-  return newBody
+  if not (isEmptyWC wc)
+    then do
+      GHC.addWarn GHC.NoReason (GHC.text "Unable to transform" GHC.<> GHC.colon GHC.<+> GHC.text (if canAsk then "MR" else "basic") $$ GHC.ppr wc)
+      return doExpr
+    else do
+      let evBinds = GHC.EvBinds . GHC.evBindMapBinds $ ev_binds_map
 
 
-typeOfExpr :: Expr.LHsExpr GHC.GhcTc -> GHC.TcM ( Maybe GHC.Type )
-typeOfExpr e = do
-  hs_env  <- GHC.getTopEnv
-  ( _, mbe ) <- liftIO ( GHC.deSugarExpr hs_env e )
-  return ( CoreUtils.exprType <$> mbe )
+      emptyZonkEnv <- GHC.emptyZonkEnv
+      ( _, zonkedEvBinds ) <-
+        GHC.zonkTcEvBinds emptyZonkEnv evBinds
+
+      let
+        wrapper =
+          GHC.mkWpLet zonkedEvBinds
+      --------------- TODO can some of this chunk of work above be done just once, in the caller?
+
+      -- Apply the wrapper to our type checked syntax and fully saturate the
+      -- diagnostic function with the necessary arguments.
+      newBody <-
+        GHC.zonkTopLExpr
+          ( GHC.mkHsApp
+             ( GHC.mkLHsWrap wrapper traceExprTc )
+              (GHC.noLoc doExpr)
+          )
+
+      return (GHC.unLoc newBody)
+
 
 
 -- | (Type class name , Optional type arguments to type class), e.g.
@@ -235,19 +279,25 @@ hasInstance givens (className,classArgs) t = do
   dictName <-
     GHC.newName ( GHC.mkDictOcc ( GHC.mkVarOcc "magic" ) )
 
+
+  m <- newFlexiTyVar (GHC.mkVisFunTy liftedTypeKind liftedTypeKind)
+  a <- newFlexiTyVar liftedTypeKind
+
+  let eq_pred = GHC.mkPrimEqPredRole GHC.Nominal (GHC.mkAppTy (GHC.mkTyVarTy m) (GHC.mkTyVarTy a)) t
+
   let
     dict_ty =
-      GHC.mkTyConApp classTyCon (classArgTys ++ [ t ])
+      GHC.mkTyConApp classTyCon (classArgTys ++ [ GHC.mkTyVarTy m ])
 
     dict_var =
       GHC.mkVanillaGlobal dictName dict_ty
 
-  GHC.EvBinds evBinds <-
-    OurConstraint.getDictionaryBindings givens dict_var
+  eq_wanted <- newWanted DefaultOrigin Nothing eq_pred
 
-  pprTraceM "hasInstance" (GHC.ppr evBinds)
+  ebs <-
+    OurConstraint.getDictionaryBindings givens [mkNonCanonical eq_wanted] dict_var
 
-  return ( not ( null (filter (not . GHC.eb_is_given) (toList evBinds ) ) ) )
+  return (isJust ebs)
 
 -- | Lookup a type class or type by module and name:
 getClassOrTypeName :: String -> String -> GHC.TcM GHC.Name
@@ -257,4 +307,5 @@ getClassOrTypeName moduleString classString = do
   case lookup_res of
     Found _ modul -> GHC.lookupOrig modul (GHC.mkOccName GHC.tcClsName classString)
     NoPackage uid -> GHC.pprPanic "np" (GHC.ppr uid)
-    NotFound a b c d e f -> GHC.pprPanic "np" (GHC.ppr a $$ GHC.ppr b $$ GHC.ppr c $$ GHC.ppr d $$ GHC.ppr e)
+    NotFound a b c d e _f -> GHC.pprPanic "np" (GHC.ppr a $$ GHC.ppr b $$ GHC.ppr c $$ GHC.ppr d $$ GHC.ppr e)
+    _ -> GHC.pprPanic "not found" GHC.empty

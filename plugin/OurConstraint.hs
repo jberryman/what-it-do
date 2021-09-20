@@ -34,8 +34,8 @@ import TcInteract
 
 
 -- Pass in "Show ()" for example
-getDictionaryBindings :: [Ct] -> Var -> TcM TcEvBinds
-getDictionaryBindings givens dict_var = do
+getDictionaryBindings :: [Ct] -> [Ct] -> Var -> TcM (Maybe TcEvBinds)
+getDictionaryBindings givens wanteds dict_var = do
 
     loc <- getCtLocM (GivenOrigin UnkSkol) Nothing
     let nonC = mkNonCanonical CtWanted
@@ -44,9 +44,9 @@ getDictionaryBindings givens dict_var = do
             , ctev_dest = EvVarDest dict_var
             , ctev_loc = loc
             }
-        wCs = mkSimpleWC [cc_ev nonC]
-    (_, evBinds) <- second evBindMapBinds <$> runTcS (solveSimpleGivens givens >> solveWanteds wCs)
-    return (EvBinds evBinds)
+        wCs = mkSimpleWC (map cc_ev (nonC : wanteds))
+    (wc, evBinds) <- second evBindMapBinds <$> runTcS (solveSimpleGivens givens >> solveWanteds wCs)
+    return $ if isEmptyWC wc then Just (EvBinds evBinds) else Nothing
 
 
 -- install :: [CommandLineOption] -> ModSummary -> TcGblEnv -> TcM TcGblEnv
