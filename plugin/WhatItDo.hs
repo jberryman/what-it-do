@@ -52,6 +52,9 @@ import Data.Maybe
 import TcMType (newFlexiTyVar, newWanted)
 import Type (liftedTypeKind)
 
+-- TODO ...
+--  - improve panic and warning messages
+
 -- When true, report unsolvable constraint errors rather than just not instrumenting
 developing :: Bool
 developing = False
@@ -307,6 +310,7 @@ getClassOrTypeName moduleString classString = do
   lookup_res <- liftIO $ findImportedModule hsc_env (GHC.mkModuleName moduleString) Nothing
   case lookup_res of
     Found _ modul -> GHC.lookupOrig modul (GHC.mkOccName GHC.tcClsName classString)
-    NoPackage uid -> GHC.pprPanic "np" (GHC.ppr uid)
-    NotFound a b c d e _f -> GHC.pprPanic "np" (GHC.ppr a $$ GHC.ppr b $$ GHC.ppr c $$ GHC.ppr d $$ GHC.ppr e)
+    NoPackage uid -> GHC.pprPanic "NoPackage" (GHC.ppr uid)
+    -- TODO better error; we get this when user doesn't add mtl as dependency (for now):
+    NotFound a b c d e _f -> GHC.pprPanic "NotFound" (GHC.ppr a $$ GHC.ppr b $$ GHC.ppr c $$ GHC.ppr d $$ GHC.ppr e)
     _ -> GHC.pprPanic "not found" GHC.empty
