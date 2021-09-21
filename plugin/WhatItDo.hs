@@ -163,7 +163,7 @@ traceDo :: m a -> m a
 traceDo =
   id
 
-
+-- TODO can we get this to work on ApplicativeDo blocks?
 -- TODO we also want to get our threadId and include that here
 -- TODO also make this a bracket pattern if IO-ish? Maybe only inject when MonadBaseControl IO m ?
 --      else we'd need a heuristic in sidecar to handle missing END markers
