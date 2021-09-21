@@ -171,8 +171,7 @@ traceInstrumentationBasic :: (Monad m)=> String -> m a -> m a
 traceInstrumentationBasic locString = \m -> do
     -- NOTE: we need !() <-... here to force a data dependency for lazy monads, e.g. ((->) a)
     !() <- traceM $ "XXXXX START " ++ locString
-    !a <- m -- TODO we might not wish to evaluate to WHNF here, or provide options
-            -- TODO we might also attach the END to WHNF of `a` itself, but we'd have
+    a <- m  -- TODO we might also attach the END to WHNF of `a` itself, but we'd have
             --      no way to be sure it would be evaluated.
             --        This would be interesting as an additional standalone
             --        trace log we can link back to the START/END span
@@ -185,7 +184,7 @@ traceInstrumentationWithContext :: (MonadReader T.Text m)=> String -> m a -> m a
 traceInstrumentationWithContext locString = \m -> do
     t <- ask
     !() <- traceM $ "XXXXX START -- context: " ++ (T.unpack t) ++ " -- " ++ locString
-    !a <- m
+    a <- m
     !() <- traceM $ "XXXXX END   " ++ locString
     return a
 {-# INLINE traceInstrumentationWithContext #-}
