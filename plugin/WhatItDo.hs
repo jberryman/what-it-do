@@ -54,6 +54,7 @@ import Type (liftedTypeKind)
 
 -- TODO ...
 --  - improve panic and warning messages
+--  - if a package doesn't use mtl or text it still needs to include those libs as a dependency
 
 -- When true, report unsolvable constraint errors rather than just not instrumenting
 developing :: Bool
