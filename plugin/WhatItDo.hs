@@ -52,6 +52,10 @@ import Data.Maybe
 import TcMType (newFlexiTyVar, newWanted)
 import Type (liftedTypeKind)
 
+import Control.Concurrent (myThreadId)
+import System.IO.Unsafe
+ 
+
 -- TODO ...
 --  - improve panic and warning messages
 
@@ -170,12 +174,12 @@ traceDo =
 traceInstrumentationBasic :: (Monad m)=> String -> m a -> m a
 traceInstrumentationBasic locString = \m -> do
     -- NOTE: we need !() <-... here to force a data dependency for lazy monads, e.g. ((->) a)
-    !() <- traceM $ ""
+    !() <- noop_traceM $ ""
     a <- m  -- TODO we might also attach the END to WHNF of `a` itself, but we'd have
             --      no way to be sure it would be evaluated.
             --        This would be interesting as an additional standalone
             --        trace log we can link back to the START/END span
-    !() <- traceM $ ""
+    !() <- noop_traceM $ ""
     return a
 {-# INLINE traceInstrumentationBasic #-}
 
@@ -183,12 +187,17 @@ traceInstrumentationBasic locString = \m -> do
 traceInstrumentationWithContext :: (MonadReader T.Text m)=> String -> m a -> m a
 traceInstrumentationWithContext locString = \m -> do
     t <- ask
-    !() <- traceM $ ""
+    !() <- noop_traceM $ ""
     a <- m
-    !() <- traceM $ ""
+    !() <- noop_traceM $ ""
     return a
 {-# INLINE traceInstrumentationWithContext #-}
 
+noop_traceM :: Applicative f => String -> f ()
+{-# NOINLINE noop_traceM #-}
+noop_traceM _string = unsafePerformIO $ do
+    !_ <- myThreadId
+    return $ pure ()
 
 ourRewriteDoExpr
   :: [GHC.EvVar]
