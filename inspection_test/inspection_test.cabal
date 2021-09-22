@@ -1,0 +1,15 @@
+name: inspection-test
+cabal-version: >= 1.24
+build-type: Simple
+version: 1.0.0
+
+executable inspection-test
+  default-language: Haskell2010
+  build-depends: base, what-it-do, mtl, text
+  main-is: Test.hs
+  ghc-options:
+    -fplugin=WhatItDo 
+    -fforce-recomp
+    -ddump-to-file -ddump-simpl -dsuppress-idinfo -dsuppress-coercions -dsuppress-type-applications 
+    -dsuppress-uniques -dsuppress-module-prefixes
+
