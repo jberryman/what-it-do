@@ -174,6 +174,7 @@ traceDo =
 traceInstrumentationBasic :: (Monad m)=> String -> m a -> m a
 traceInstrumentationBasic locString = \m -> do
     -- NOTE: we need !() <-... here to force a data dependency for lazy monads, e.g. ((->) a)
+    !() <- noop_traceM
     a <- m  -- TODO we might also attach the END to WHNF of `a` itself, but we'd have
             --      no way to be sure it would be evaluated.
             --        This would be interesting as an additional standalone
@@ -186,6 +187,7 @@ traceInstrumentationBasic locString = \m -> do
 traceInstrumentationWithContext :: (MonadReader T.Text m)=> String -> m a -> m a
 traceInstrumentationWithContext locString = \m -> do
     t <- ask
+    !() <- noop_traceM
     a <- m
     !() <- noop_traceM
     return a
@@ -193,7 +195,7 @@ traceInstrumentationWithContext locString = \m -> do
 
 noop_traceM :: Applicative f => f ()
 {-# NOINLINE noop_traceM #-}
-noop_traceM = unsafePerformIO $ do
+noop_traceM = unsafeDupablePerformIO $ do
     !_ <- return ()
     return $ pure ()
 
