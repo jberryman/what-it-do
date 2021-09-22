@@ -19,3 +19,5 @@ library
   exposed-modules: WhatItDo
   other-modules: OurConstraint
   ghc-options: -Wall
+    -ddump-to-file -ddump-simpl -dsuppress-idinfo -dsuppress-coercions -dsuppress-type-applications 
+    -dsuppress-uniques -dsuppress-module-prefixes

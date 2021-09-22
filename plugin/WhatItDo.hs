@@ -175,12 +175,10 @@ traceInstrumentationBasic :: (Monad m)=> String -> m a -> m a
 traceInstrumentationBasic locString = \m -> do
     -- NOTE: we need !() <-... here to force a data dependency for lazy monads, e.g. ((->) a)
     !() <- noop_traceM
-    a <- m  -- TODO we might also attach the END to WHNF of `a` itself, but we'd have
+    m  -- TODO we might also attach the END to WHNF of `a` itself, but we'd have
             --      no way to be sure it would be evaluated.
             --        This would be interesting as an additional standalone
             --        trace log we can link back to the START/END span
-    !() <- noop_traceM
-    return a
 {-# INLINE traceInstrumentationBasic #-}
 
 -- Proof of concept: we can inject different code based on results of type checking:
@@ -188,9 +186,7 @@ traceInstrumentationWithContext :: (MonadReader T.Text m)=> String -> m a -> m a
 traceInstrumentationWithContext locString = \m -> do
     t <- ask
     !() <- noop_traceM
-    a <- m
-    !() <- noop_traceM
-    return a
+    m
 {-# INLINE traceInstrumentationWithContext #-}
 
 noop_traceM :: Applicative f => f ()
