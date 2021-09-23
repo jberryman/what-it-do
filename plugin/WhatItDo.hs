@@ -53,10 +53,12 @@ import TcMType (newFlexiTyVar, newWanted)
 import Type (liftedTypeKind)
 
 import System.IO.Unsafe
--- import Data.IORef
+import Data.IORef
 import Foreign.Ptr
 import Foreign.Storable
 import qualified Foreign.Marshal.Utils as Foreign
+import Data.Map.Strict as C
+import Control.Concurrent.MVar
 
 -- TODO ...
 --  - improve panic and warning messages
@@ -177,7 +179,7 @@ traceDo =
 traceInstrumentationBasic :: (Monad m)=> String -> m a -> m a
 traceInstrumentationBasic locString = \m -> do
     -- NOTE: we need !() <-... here to force a data dependency for lazy monads, e.g. ((->) a)
-    !() <- our_traceM $ "XXXXX START " ++ locString
+    !() <- our_traceM2 $ "XXXXX START " ++ locString
     a <- m  -- TODO we might also attach the END to WHNF of `a` itself, but we'd have
             --      no way to be sure it would be evaluated.
             --        This would be interesting as an additional standalone
@@ -190,7 +192,7 @@ traceInstrumentationBasic locString = \m -> do
 traceInstrumentationWithContext :: (MonadReader T.Text m)=> String -> m a -> m a
 traceInstrumentationWithContext locString = \m -> do
     t <- ask
-    !() <- our_traceM $ "XXXXX START -- context: " ++ (T.unpack t) ++ " -- " ++ locString
+    !() <- our_traceM2 $ "XXXXX START -- context: " ++ (T.unpack t) ++ " -- " ++ locString
     a <- m
     !() <- our_traceM $ "XXXXX END   " ++ locString
     return a
@@ -208,6 +210,24 @@ our_traceM s = unsafePerformIO $ do
     b <- peek _TRACING_ENABLED
     when b $ putStr s
     return $ pure ()
+
+our_traceM2 :: Applicative f => String -> f ()
+{-# NOINLINE our_traceM2 #-}
+our_traceM2 s = unsafePerformIO $ do
+    mp <- takeMVar traceCalls
+    let (mbCnt, !mp') = C.insertLookupWithKey (\_ -> (+)) s 1 mp
+    putMVar traceCalls mp'
+    case mbCnt of
+      Just n | n `mod` 1000 == 0 -> do
+          appendFile "/tmp/shmerrr" $ show mp'
+      _ -> pure ()
+    return $ pure ()
+
+traceCalls :: MVar (C.Map String Int)
+{-# NOINLINE traceCalls #-}
+traceCalls = unsafePerformIO $ do
+    newMVar mempty
+
 
 -- | Global tracing on/off
 _TRACING_ENABLED :: Ptr Bool

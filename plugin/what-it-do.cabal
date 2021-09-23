@@ -13,6 +13,7 @@ library
                , template-haskell
                , prettyprinter
                , ghc-paths
+               , containers
                -- For the instrumentation payload, for now:
                , mtl
                , text
