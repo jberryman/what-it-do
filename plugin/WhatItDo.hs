@@ -5,7 +5,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 
-module WhatItDo ( plugin, traceDo ) where
+module WhatItDo ( plugin, traceDo, _TRACING_ENABLED ) where
 
 -- base
 -- ghc
@@ -43,7 +43,7 @@ import qualified OurConstraint
 import qualified Data.Text as T
 import Control.Monad.Reader
 
-import Debug.Trace
+-- import Debug.Trace
 import GHC.Hs.Binds
 import Var (EvVar)
 import Data.Typeable
@@ -51,6 +51,12 @@ import qualified TcErrors as GHC
 import Data.Maybe
 import TcMType (newFlexiTyVar, newWanted)
 import Type (liftedTypeKind)
+
+import System.IO.Unsafe
+-- import Data.IORef
+import Foreign.Ptr
+import Foreign.Storable
+import qualified Foreign.Marshal.Utils as Foreign
 
 -- TODO ...
 --  - improve panic and warning messages
@@ -171,12 +177,12 @@ traceDo =
 traceInstrumentationBasic :: (Monad m)=> String -> m a -> m a
 traceInstrumentationBasic locString = \m -> do
     -- NOTE: we need !() <-... here to force a data dependency for lazy monads, e.g. ((->) a)
-    !() <- traceM $ "XXXXX START " ++ locString
+    !() <- our_traceM $ "XXXXX START " ++ locString
     a <- m  -- TODO we might also attach the END to WHNF of `a` itself, but we'd have
             --      no way to be sure it would be evaluated.
             --        This would be interesting as an additional standalone
             --        trace log we can link back to the START/END span
-    !() <- traceM $ "XXXXX END   " ++ locString
+    !() <- our_traceM $ "XXXXX END   " ++ locString
     return a
 {-# INLINE traceInstrumentationBasic #-}
 
@@ -184,11 +190,31 @@ traceInstrumentationBasic locString = \m -> do
 traceInstrumentationWithContext :: (MonadReader T.Text m)=> String -> m a -> m a
 traceInstrumentationWithContext locString = \m -> do
     t <- ask
-    !() <- traceM $ "XXXXX START -- context: " ++ (T.unpack t) ++ " -- " ++ locString
+    !() <- our_traceM $ "XXXXX START -- context: " ++ (T.unpack t) ++ " -- " ++ locString
     a <- m
-    !() <- traceM $ "XXXXX END   " ++ locString
+    !() <- our_traceM $ "XXXXX END   " ++ locString
     return a
 {-# INLINE traceInstrumentationWithContext #-}
+
+-- TODO NOTE: INLINE unsafePerformIO seems basically to work here due to the
+-- data dependency, I think, and as long as the arguments are all unique
+-- (distinct source code locations).
+-- ...but I think this may break down in the presence of full CSE e.g. if an
+-- annotated `do` block is inlined twice resulting in two applications with the
+-- same static arguments
+our_traceM :: Applicative f => String -> f ()
+{-# INLINE our_traceM #-}
+our_traceM s = unsafePerformIO $ do
+    b <- peek _TRACING_ENABLED
+    when b $ putStr s
+    return $ pure ()
+
+-- | Global tracing on/off
+_TRACING_ENABLED :: Ptr Bool
+{-# NOINLINE _TRACING_ENABLED #-}
+_TRACING_ENABLED = unsafePerformIO $ 
+    -- NOTE: fewer indirections than IORef, can be unboxed at 'peek' callsite:
+    Foreign.new False
 
 
 ourRewriteDoExpr
