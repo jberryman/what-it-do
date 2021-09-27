@@ -178,12 +178,13 @@ traceInstrumentationBasic :: (Monad m)=> String -> m a -> m a
 traceInstrumentationBasic locString = \m -> do
     -- NOTE: we need !() <-... here to force a data dependency for lazy monads, e.g. ((->) a)
     !() <- our_traceM $ "XXXXX START " ++ locString
-    a <- m  -- TODO we might also attach the END to WHNF of `a` itself, but we'd have
-            --      no way to be sure it would be evaluated.
-            --        This would be interesting as an additional standalone
-            --        trace log we can link back to the START/END span
-    !() <- our_traceM $ "XXXXX END   " ++ locString
-    return a
+    m
+    -- a <- m  -- TODO we might also attach the END to WHNF of `a` itself, but we'd have
+    --         --      no way to be sure it would be evaluated.
+    --         --        This would be interesting as an additional standalone
+    --         --        trace log we can link back to the START/END span
+    -- !() <- our_traceM $ "XXXXX END   " ++ locString
+    -- return a
 {-# INLINE traceInstrumentationBasic #-}
 
 -- Proof of concept: we can inject different code based on results of type checking:
@@ -191,9 +192,10 @@ traceInstrumentationWithContext :: (MonadReader T.Text m)=> String -> m a -> m a
 traceInstrumentationWithContext locString = \m -> do
     t <- ask
     !() <- our_traceM $ "XXXXX START -- context: " ++ (T.unpack t) ++ " -- " ++ locString
-    a <- m
-    !() <- our_traceM $ "XXXXX END   " ++ locString
-    return a
+    m
+    -- a <- m
+    -- !() <- our_traceM $ "XXXXX END   " ++ locString
+    -- return a
 {-# INLINE traceInstrumentationWithContext #-}
 
 -- TODO NOTE: INLINE unsafePerformIO seems basically to work here due to the
